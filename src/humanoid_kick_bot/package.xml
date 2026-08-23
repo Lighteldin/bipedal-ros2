@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>humanoid_kick_bot</name>
+  <version>0.1.0</version>
+  <description>
+    Autonomous humanoid lower-body robot: detects a football, computes leg joint
+    angles via FK/IK, and executes a kicking motion through PCA9685-driven
+    servos over an ESP32 serial bridge. Modular perception / planning / control
+    ROS 2 architecture.
+  </description>
+  <maintainer email="you@example.com">student</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf2_geometry_msgs</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>joint_state_publisher</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-serial</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -1,0 +1,63 @@
+# servo_config.yaml
+# Single source of truth for channel mapping, PWM calibration and leg
+# geometry. Loaded by servo_controller_node and ik_planner_node.
+
+pca9685:
+  i2c_bus_note: "PCA9685 is driven from the ESP32 (GPIO21=SDA, GPIO22=SCL)."
+  pwm_frequency_hz: 50
+  pwm_min: 120          # PWM tick @ 0 deg
+  pwm_max: 520          # PWM tick @ 180 deg
+  angle_min_deg: 0
+  angle_max_deg: 180
+  neutral_deg: 90        # all servos power up / home at 90 deg
+
+# Channel map exactly as wired on the robot. Do not renumber these without
+# also updating the ESP32 firmware and the URDF joint <-> channel comments.
+channels:
+  camera_pan:   7
+  left_waist:   8
+  right_waist:  9
+  left_thigh:   10
+  right_thigh:  11
+  left_shin:    12
+  right_shin:   13
+  left_foot:    14
+  right_foot:   15
+
+# Per-joint safe range of motion, in servo degrees (0-180 servo frame, 90 =
+# neutral/straight). Keep conservative to protect the mechanism.
+joint_limits_deg:
+  camera_pan:   {min: 30,  max: 150}
+  left_waist:   {min: 70,  max: 110}
+  right_waist:  {min: 70,  max: 110}
+  left_thigh:   {min: 30,  max: 150}
+  right_thigh:  {min: 30,  max: 150}
+  left_shin:    {min: 20,  max: 160}
+  right_shin:   {min: 20,  max: 160}
+  left_foot:    {min: 60,  max: 120}
+  right_foot:   {min: 60,  max: 120}
+
+# Kicking-leg 2-DOF planar model (Part 2 of the assignment).
+# Only "thigh" (theta1 / hip) and "shin" (theta2 / knee) participate in the
+# FK/IK solve. "waist" and "foot" are held at posture/balance angles that
+# the state machine sets directly (not through IK) so the standing leg keeps
+# the robot stable while the kicking leg swings.
+leg_geometry:
+  L1_thigh_m: 0.090   # thigh link length
+  L2_shin_m:  0.085   # shin link length
+  # Servo-frame offset: servo angle = 90 + degrees(kinematic theta)
+  # i.e. kinematic theta = 0 (leg pointing along +x, straight forward)
+  # corresponds to the physical servo's 90 deg neutral pose.
+  theta1_servo_offset_deg: 90
+  theta2_servo_offset_deg: 90
+
+kick_leg: "right"     # which leg performs the kick; the other is the stance leg
+
+balance_pose_deg:
+  # Posture held by the stance leg + waist joints while tracking/kicking
+  left_waist: 90
+  right_waist: 90
+  left_thigh: 90
+  left_shin: 90
+  left_foot: 90
+  right_foot: 90

@@ -1,0 +1,41 @@
+# ---- ROS 2 / colcon build artifacts ----
+build/
+install/
+log/
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+*.egg
+
+# ---- ROS 2 ament_python quirks ----
+# generated when you run `colcon build --symlink-install` in some setups
+*.egg-link
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- Arduino / PlatformIO (for the ESP32 firmware) ----
+.pio/
+.pioenvs/
+.piolibdeps/
+*.hex
+*.elf
+*.bin
+
+# ---- Serial / hardware logs, calibration dumps you don't want committed ----
+*.log
+
+# ---- rosbag recordings, if you start capturing test runs ----
+*.db3
+rosbag2_*/
+
+# ---- Local, machine-specific overrides (e.g. your serial port, camera index) ----
+config/local_*.yaml
