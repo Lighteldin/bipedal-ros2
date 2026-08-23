@@ -19,7 +19,9 @@
   <xacro:property name="shin_len" value="0.085"/>
   <xacro:property name="link_radius" value="0.012"/>
   <xacro:property name="hip_sep" value="0.05"/>
-  <xacro:property name="base_height" value="0.02"/>
+  <xacro:property name="torso_depth" value="0.025"/>   <!-- front-to-back (x) -->
+  <xacro:property name="torso_width" value="0.10"/>   <!-- left-to-right (y) -->
+  <xacro:property name="torso_height" value="0.15"/>  <!-- vertical (z) - tall, upright torso -->
 
   <material name="grey"><color rgba="0.6 0.6 0.6 1"/></material>
   <material name="orange"><color rgba="0.9 0.45 0.05 1"/></material>
@@ -28,13 +30,14 @@
   <!-- Fixed base: the robot stands on this (PART 1: "fixed base") -->
   <link name="base_footprint"/>
 
+  <!-- Upright torso, standing like a human body (tall box: depth x width x height) -->
   <link name="base_link">
     <visual>
-      <geometry><box size="0.14 0.10 ${base_height}"/></geometry>
+      <geometry><box size="${torso_depth} ${torso_width} ${torso_height}"/></geometry>
       <material name="grey"/>
     </visual>
     <collision>
-      <geometry><box size="0.14 0.10 ${base_height}"/></geometry>
+      <geometry><box size="${torso_depth} ${torso_width} ${torso_height}"/></geometry>
     </collision>
     <inertial>
       <mass value="0.3"/>
@@ -42,18 +45,20 @@
     </inertial>
   </link>
 
+  <!-- base_link is centered on its own origin, so its bottom face sits at
+       -torso_height/2 - place that bottom face right on top of the legs. -->
   <joint name="base_footprint_joint" type="fixed">
     <parent link="base_footprint"/>
     <child link="base_link"/>
-    <origin xyz="0 0 ${thigh_len+shin_len+0.02}" rpy="0 0 0"/>
+    <origin xyz="0 0 ${thigh_len+shin_len+torso_height/2}" rpy="0 0 0"/>
   </joint>
 
-  <!-- Camera (CH7) -->
+  <!-- Camera (CH7): mounted on TOP of the torso, facing forward (+x) -->
   <link name="camera_mount"/>
   <joint name="camera_mount_joint" type="fixed">
     <parent link="base_link"/>
     <child link="camera_mount"/>
-    <origin xyz="0.07 0 0.02" rpy="0 0 0"/>
+    <origin xyz="${torso_depth/2 - 0.005} 0 ${torso_height/2}" rpy="0 0 0"/>
   </joint>
 
   <link name="camera_link">
@@ -67,7 +72,7 @@
     <child link="camera_link"/>
     <origin xyz="0 0 0" rpy="0 0 0"/>
     <axis xyz="0 0 1"/>
-    <limit lower="0.52" upper="2.62" effort="1.0" velocity="3.0"/> <!-- ~30-150 deg -->
+    <limit lower="-1.05" upper="1.05" effort="1.0" velocity="3.0"/> <!-- +-60 deg from neutral (~30-150 deg servo) -->
   </joint>
 
   <!-- ============ Leg macro (waist -> thigh -> shin -> foot) ============ -->
@@ -79,9 +84,9 @@
     <joint name="${side}_waist" type="revolute">
       <parent link="base_link"/>
       <child link="${side}_waist_link"/>
-      <origin xyz="-0.02 ${y_off} -${base_height/2}" rpy="0 0 0"/>
+      <origin xyz="-0.02 ${y_off} -${torso_height/2}" rpy="0 0 0"/>
       <axis xyz="0 0 1"/>
-      <limit lower="1.22" upper="1.92" effort="1.0" velocity="3.0"/> <!-- ~70-110 deg -->
+      <limit lower="-0.35" upper="0.35" effort="1.0" velocity="3.0"/> <!-- +-20 deg from neutral (~70-110 deg servo) -->
     </joint>
 
     <!-- thigh_link origin = hip joint = IK frame origin for this leg -->
@@ -102,7 +107,7 @@
       <child link="${side}_thigh_link"/>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <axis xyz="0 1 0"/> <!-- pitch: sagittal plane matches FK x-y model -->
-      <limit lower="0.52" upper="2.62" effort="1.0" velocity="3.0"/> <!-- ~30-150 deg -->
+      <limit lower="-1.05" upper="1.05" effort="1.0" velocity="3.0"/> <!-- +-60 deg from neutral (~30-150 deg servo) -->
     </joint>
 
     <link name="${side}_shin_link">
@@ -122,7 +127,7 @@
       <child link="${side}_shin_link"/>
       <origin xyz="0 0 -${thigh_len}" rpy="0 0 0"/>
       <axis xyz="0 1 0"/>
-      <limit lower="0.35" upper="2.79" effort="1.0" velocity="3.0"/> <!-- ~20-160 deg -->
+      <limit lower="-1.22" upper="1.22" effort="1.0" velocity="3.0"/> <!-- +-70 deg from neutral (~20-160 deg servo) -->
     </joint>
 
     <link name="${side}_foot_link">
@@ -142,7 +147,7 @@
       <child link="${side}_foot_link"/>
       <origin xyz="0 0 -${shin_len}" rpy="0 0 0"/>
       <axis xyz="0 1 0"/>
-      <limit lower="1.05" upper="2.09" effort="1.0" velocity="3.0"/> <!-- ~60-120 deg -->
+      <limit lower="-0.52" upper="0.52" effort="1.0" velocity="3.0"/> <!-- +-30 deg from neutral (~60-120 deg servo) -->
     </joint>
 
   </xacro:macro>

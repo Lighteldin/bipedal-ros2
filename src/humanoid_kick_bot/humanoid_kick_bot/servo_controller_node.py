@@ -53,14 +53,14 @@ class SerialBridge:
         self.logger = logger
         self.ser = None
         if serial is None:
-            self.logger.warn('pyserial not installed - running in DRY-RUN mode (no hardware).')
+            self.logger.warning('pyserial not installed - running in DRY-RUN mode (no hardware).')
             return
         try:
             self.ser = serial.Serial(port, baud, timeout=0.05)
             time.sleep(2.0)  # allow ESP32 to reset after port open
             self.logger.info(f'Connected to ESP32 on {port} @ {baud} baud')
         except Exception as e:
-            self.logger.warn(f'Could not open serial port {port}: {e}. DRY-RUN mode.')
+            self.logger.warning(f'Could not open serial port {port}: {e}. DRY-RUN mode.')
             self.ser = None
 
     def send(self, channel: int, pwm_ticks: int):
@@ -98,12 +98,27 @@ class ServoControllerNode(Node):
         self.bridge = SerialBridge(port, baud, self.get_logger())
 
         self._last_pwm = {}
+        # /joint_states drives RViz's TF tree via the URDF, and the URDF's
+        # "zero rotation" pose for the leg joints is straight-down/neutral -
+        # but raw servo angles are 0-180 deg with 90 deg AS that neutral
+        # pose. If we published raw servo radians directly, RViz would
+        # interpret servo=90 deg as "rotate 90 deg away from straight-down",
+        # folding the legs sideways. So we track a VISUALIZATION angle here
+        # (raw_servo_angle - NEUTRAL_OFFSET), separate from the raw PWM
+        # sent to hardware, so servo=90 deg -> URDF joint angle=0 (neutral).
+        self.NEUTRAL_OFFSET_RAD = math.radians(90.0)
+        self._current_positions = {name: 0.0 for name in self.channels.keys()}
 
         self.create_subscription(JointState, '/joint_commands', self._cmd_cb, 10)
         self.state_pub = self.create_publisher(JointState, '/joint_states', 10)
 
         # Home all servos to neutral (90 deg) on startup, as specified.
         self._home_all()
+
+        # Republish continuously (not just on command) so a late-starting
+        # robot_state_publisher / RViz always finds current data - a single
+        # startup publish can race with subscribers that haven't connected yet.
+        self.create_timer(0.2, self._publish_current_state)
 
         self.get_logger().info('Servo controller ready.')
 
@@ -126,20 +141,24 @@ class ServoControllerNode(Node):
         return max(lim['min'], min(lim['max'], angle_deg))
 
     def _home_all(self):
-        names, positions = [], []
         for name in self.channels.keys():
             self._send_angle(name, 90.0)
-            names.append(name)
-            positions.append(math.radians(90.0))
-        init_state = JointState()
-        init_state.header.stamp = self.get_clock().now().to_msg()
-        init_state.name = names
-        init_state.position = positions
-        self.state_pub.publish(init_state)
+            self._current_positions[name] = 0.0  # 90 deg servo == 0 rad URDF (neutral)
+
+    def _publish_current_state(self):
+        """Publish the FULL known pose (all 9 joints) on every tick, so
+        robot_state_publisher / RViz always have complete, current data -
+        this fixes the 'No transform from [joint] to [base_footprint]'
+        error, which happens when a joint's position is never received."""
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = list(self._current_positions.keys())
+        msg.position = list(self._current_positions.values())
+        self.state_pub.publish(msg)
 
     def _send_angle(self, name: str, angle_deg: float):
         if name not in self.channels:
-            self.get_logger().warn(f'Unknown joint "{name}", no channel mapping - skipped.')
+            self.get_logger().warning(f'Unknown joint "{name}", no channel mapping - skipped.')
             return
         angle_deg = self._clip_limits(name, angle_deg)
         ch = self.channels[name]
@@ -150,18 +169,15 @@ class ServoControllerNode(Node):
         self.bridge.send(ch, pwm)
 
     def _cmd_cb(self, msg: JointState):
-        out = JointState()
-        out.header.stamp = self.get_clock().now().to_msg()
-        out.name = list(msg.name)
-        out.position = list(msg.position)
-
         for name, pos_rad in zip(msg.name, msg.position):
+            # pos_rad is a raw servo-frame angle (0 = 0 deg, pi/2 = 90 deg
+            # neutral, pi = 180 deg) as sent by ik_planner_node/manual pubs.
             angle_deg = math.degrees(pos_rad)
             self._send_angle(name, angle_deg)
-
-        # Mirror the commanded pose to /joint_states for RViz/TF, regardless
-        # of whether real hardware is attached.
-        self.state_pub.publish(out)
+            # Update our tracked full-body pose for VISUALIZATION, offset so
+            # servo-neutral (90 deg) maps to URDF joint angle 0; see the
+            # NEUTRAL_OFFSET_RAD comment in __init__ for why.
+            self._current_positions[name] = pos_rad - self.NEUTRAL_OFFSET_RAD
 
 
 def main(args=None):

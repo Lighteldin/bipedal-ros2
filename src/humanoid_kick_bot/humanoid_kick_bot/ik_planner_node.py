@@ -97,7 +97,7 @@ class IKPlannerNode(Node):
     # ---------- config ----------
     def _load_config(self, path):
         if not path:
-            self.get_logger().warn('No config_path given, using built-in defaults.')
+            self.get_logger().warning('No config_path given, using built-in defaults.')
             return {
                 'leg_geometry': {'L1_thigh_m': 0.09, 'L2_shin_m': 0.085,
                                   'theta1_servo_offset_deg': 90, 'theta2_servo_offset_deg': 90},
@@ -154,7 +154,7 @@ class IKPlannerNode(Node):
             return p
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
                 tf2_ros.ExtrapolationException) as e:
-            self.get_logger().warn(f'TF transform failed: {e}', throttle_duration_sec=2.0)
+            self.get_logger().warning(f'TF transform failed: {e}', throttle_duration_sec=2.0)
             return None
 
     # ---------- state machine ----------
@@ -234,7 +234,7 @@ class IKPlannerNode(Node):
         try:
             theta1, theta2 = inverse_kinematics(x, y, self.geom, knee_forward=knee_forward)
         except KinematicsError as e:
-            self.get_logger().warn(f'IK unreachable: {e}')
+            self.get_logger().warning(f'IK unreachable: {e}')
             return False
 
         if not verify_ik(theta1, theta2, x, y, self.geom):
