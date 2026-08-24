@@ -58,7 +58,10 @@ def generate_launch_description():
         name='ball_detector_node',
         output='screen',
         parameters=[{
-            'camera_source': LaunchConfiguration('camera_source'),
+            'camera_source': ParameterValue(
+                LaunchConfiguration('camera_source'),
+                value_type=str
+            ),
             'esp32_cam_ip': LaunchConfiguration('esp32_cam_ip'),
         }],
     )
