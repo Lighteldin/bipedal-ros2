@@ -85,7 +85,7 @@
       <parent link="base_link"/>
       <child link="${side}_waist_link"/>
       <origin xyz="-0.02 ${y_off} -${torso_height/2}" rpy="0 0 0"/>
-      <axis xyz="0 0 1"/>
+      <axis xyz="1 0 0"/>
       <limit lower="-0.35" upper="0.35" effort="1.0" velocity="3.0"/> <!-- +-20 deg from neutral (~70-110 deg servo) -->
     </joint>
 
@@ -146,7 +146,7 @@
       <parent link="${side}_shin_link"/>
       <child link="${side}_foot_link"/>
       <origin xyz="0 0 -${shin_len}" rpy="0 0 0"/>
-      <axis xyz="0 1 0"/>
+      <axis xyz="1 0 0"/>
       <limit lower="-0.52" upper="0.52" effort="1.0" velocity="3.0"/> <!-- +-30 deg from neutral (~60-120 deg servo) -->
     </joint>
 

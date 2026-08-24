@@ -92,6 +92,7 @@ class ServoControllerNode(Node):
         self.angle_max = pca['angle_max_deg']
         self.channels = self.cfg['channels']
         self.limits = self.cfg.get('joint_limits_deg', {})
+        self.inverted_channels = set(self.cfg.get('inverted_channels', []))
 
         port = self.get_parameter('serial_port').value
         baud = self.get_parameter('serial_baud').value
@@ -160,6 +161,9 @@ class ServoControllerNode(Node):
         if name not in self.channels:
             self.get_logger().warning(f'Unknown joint "{name}", no channel mapping - skipped.')
             return
+        if name in self.inverted_channels:
+            # Mirror around 90 deg neutral: 60<->120, 30<->150, etc.
+            angle_deg = 180.0 - angle_deg
         angle_deg = self._clip_limits(name, angle_deg)
         ch = self.channels[name]
         pwm = self._deg_to_pwm(angle_deg)

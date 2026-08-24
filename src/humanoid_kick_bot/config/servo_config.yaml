@@ -61,3 +61,7 @@ balance_pose_deg:
   left_shin: 90
   left_foot: 90
   right_foot: 90
+
+inverted_channels:
+  - right_shin
+  - left_thigh

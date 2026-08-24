@@ -81,6 +81,8 @@ class IKPlannerNode(Node):
         self.declare_parameter('align_tolerance_m', 0.02)
         self.declare_parameter('control_rate_hz', 20.0)
         self.declare_parameter('walk_phase_duration_sec', 0.5)
+        self.declare_parameter('kick_confirm_frames', 8)  # debounce: consecutive in-range frames needed before committing to a kick
+        self.declare_parameter('autonomous_kick_enabled', False)
 
         cfg_path = self.get_parameter('config_path').value
         self.cfg = self._load_config(cfg_path)
@@ -94,9 +96,13 @@ class IKPlannerNode(Node):
         self.balance_pose = self.cfg['balance_pose_deg']
         self.limits = self.cfg['joint_limits_deg']
 
+
         self.kick_trigger_d = float(self.get_parameter('kick_trigger_distance_m').value)
         self.align_tol = float(self.get_parameter('align_tolerance_m').value)
         self.walk_phase_duration = float(self.get_parameter('walk_phase_duration_sec').value)
+        self.kick_confirm_frames = int(self.get_parameter('kick_confirm_frames').value)
+        self._in_range_count = 0  # debounce counter, see _do_track_and_check_kick
+        self.autonomous_kick_enabled = bool(self.get_parameter('autonomous_kick_enabled').value)
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -113,6 +119,7 @@ class IKPlannerNode(Node):
         self.create_subscription(Bool, '/ball_detected', self._detected_cb, 10)
         self.create_subscription(String, '/kick_command', self._kick_cmd_cb, 10)
         self.create_subscription(String, '/walk_command', self._walk_cmd_cb, 10)
+        self.create_subscription(Bool, '/autonomy_enable', self._autonomy_enable_cb, 10)
 
         self.cmd_pub = self.create_publisher(JointState, '/joint_commands', 10)
         self.target_pub = self.create_publisher(PointStamped, '/leg_target', 10)
@@ -194,6 +201,16 @@ class IKPlannerNode(Node):
         else:
             self.get_logger().warning(f"Invalid /walk_command '{msg.data}' - use 'start' or 'stop'")
 
+    def _autonomy_enable_cb(self, msg: Bool):
+        """Toggle autonomous ball-triggered kicking at runtime, e.g. while
+        tuning vision - the robot keeps searching/tracking/standing but
+        will never commit to a kick on its own while this is False.
+            ros2 topic pub --once /autonomy_enable std_msgs/msg/Bool "{data: false}"
+            ros2 topic pub --once /autonomy_enable std_msgs/msg/Bool "{data: true}"
+        Manual /kick_command and /walk_command still work regardless."""
+        self.autonomous_kick_enabled = bool(msg.data)
+        self.get_logger().info(f'Autonomous kicking {"ENABLED" if msg.data else "DISABLED"}')
+
     # ---------- helpers ----------
     def _deg(self, name):
         return math.radians(self.balance_pose.get(name, 90))
@@ -266,6 +283,7 @@ class IKPlannerNode(Node):
 
         elif self.state == self.STATE_READY:
             if not self.ball_seen_recently or p is None:
+                self._in_range_count = 0
                 self._set_state(self.STATE_SEARCH)
                 return
             self._do_track_and_check_kick(p)
@@ -307,7 +325,23 @@ class IKPlannerNode(Node):
 
         self._publish_joint_cmd(self.balance_pose)
 
+        # Debounce: require several CONSECUTIVE in-range frames before
+        # actually committing to a kick, so one noisy/false-positive frame
+        # (background color matching the HSV filter, a lighting flare, etc.)
+        # can't fire the whole kick sequence by itself.
         if distance <= self.kick_trigger_d:
+            self._in_range_count += 1
+        else:
+            self._in_range_count = 0
+
+        if self._in_range_count >= self.kick_confirm_frames:
+            self._in_range_count = 0
+            if not self.autonomous_kick_enabled:
+                self.get_logger().info(
+                    'Ball in kicking range, but autonomous_kick_enabled is False - standing down. '
+                    'Enable with: ros2 topic pub --once /autonomy_enable std_msgs/msg/Bool "{data: true}"',
+                    throttle_duration_sec=3.0)
+                return
             self.active_kick_leg = self.kick_leg  # autonomous kicks always use the configured leg
             self._kick_x, self._kick_y = x, y
             self._set_state(self.STATE_WINDUP)

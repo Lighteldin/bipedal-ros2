@@ -20,6 +20,7 @@ from launch.conditions import IfCondition
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
+
 def generate_launch_description():
     pkg_share = get_package_share_directory('humanoid_kick_bot')
     urdf_path = os.path.join(pkg_share, 'urdf', 'humanoid_leg.urdf.xacro')
@@ -27,17 +28,38 @@ def generate_launch_description():
     rviz_path = os.path.join(pkg_share, 'rviz', 'humanoid.rviz')
 
     camera_source_arg = DeclareLaunchArgument(
-        'camera_source', default_value='0',
-        description='Fallback if esp32_cam_ip is not set: webcam index (e.g. 0) or a full MJPEG URL')
+        'camera_source',
+        default_value='0',
+        description='Fallback if esp32_cam_ip is not set: webcam index (e.g. 0) or a full MJPEG URL'
+    )
+
     esp32_cam_ip_arg = DeclareLaunchArgument(
-        'esp32_cam_ip', default_value='',
+        'esp32_cam_ip',
+        default_value='',
         description='ESP32-CAM IP address, e.g. 192.168.1.50 - preferred way to point at the camera; '
-                    'builds http://<ip>:81/stream automatically. Leave empty to use camera_source instead.')
+                    'builds http://<ip>:81/stream automatically. Leave empty to use camera_source instead.'
+    )
+
     serial_port_arg = DeclareLaunchArgument(
-        'serial_port', default_value='/dev/ttyUSB0',
-        description='Serial port to the ESP32 running esp32_pca9685_bridge.ino')
+        'serial_port',
+        default_value='/dev/ttyUSB0',
+        description='Serial port to the ESP32 running esp32_pca9685_bridge.ino'
+    )
+
     use_rviz_arg = DeclareLaunchArgument(
-        'use_rviz', default_value='true', description='Launch RViz2')
+        'use_rviz',
+        default_value='true',
+        description='Launch RViz2'
+    )
+
+    # Autonomous kicking is OFF by default.
+    # Enable at launch with:
+    # ros2 launch humanoid_kick_bot bringup.launch.py autonomous_kick_enabled:=true
+    autonomous_kick_arg = DeclareLaunchArgument(
+        'autonomous_kick_enabled',
+        default_value='false',
+        description='Enable autonomous ball-triggered kicking at startup'
+    )
 
     robot_description = ParameterValue(
         Command(['xacro ', urdf_path]),
@@ -71,7 +93,12 @@ def generate_launch_description():
         executable='ik_planner_node',
         name='ik_planner_node',
         output='screen',
-        parameters=[{'config_path': config_path}],
+        parameters=[{
+            'config_path': config_path,
+            'autonomous_kick_enabled': LaunchConfiguration(
+                'autonomous_kick_enabled'
+            ),
+        }],
     )
 
     servo_controller = Node(
@@ -102,6 +129,7 @@ def generate_launch_description():
         esp32_cam_ip_arg,
         serial_port_arg,
         use_rviz_arg,
+        autonomous_kick_arg,
         robot_state_publisher,
         ball_detector,
         ik_planner,
