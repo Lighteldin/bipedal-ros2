@@ -6,9 +6,14 @@ PART 2 - Robot Kinematics + PART 4 - Autonomous Behavior.
 
 Subscribes:  /ball_position   (geometry_msgs/PointStamped, camera_link frame)
              /ball_detected   (std_msgs/Bool)
+             /kick_command    (std_msgs/String, data: "left" or "right")
+                               -> manually trigger a kick with that leg,
+                               independent of the camera/ball.
+             /walk_command    (std_msgs/String, data: "start" or "stop")
+                               -> toggle an open-loop marching gait.
 Publishes:   /joint_commands  (sensor_msgs/JointState) - target angles [rad]
-                               for ALL 9 servos (camera_pan + 8 leg joints),
-                               consumed by servo_controller_node.
+                               for ALL 9 servos, consumed by
+                               servo_controller_node.
              /leg_target      (geometry_msgs/PointStamped) - the (x,y) target
                                handed to the IK solver, for debugging/RViz.
 
@@ -19,8 +24,22 @@ machine:
 
     SEARCH -> ALIGN -> APPROACH_READY -> WINDUP -> STRIKE -> FOLLOW_THROUGH -> RETRACT -> SEARCH
 
-The state machine is what makes the system "fully autonomous": no operator
-input is required once the node is launched with a ball in view.
+That state machine is what makes the ball-kicking behavior fully autonomous.
+On top of it, two manual override commands are available for bench testing
+(see the docstrings on _kick_cmd_cb / _walk_cmd_cb below) without needing a
+ball in view at all.
+
+IMPORTANT - about /walk_command:
+    The mechanical design in urdf/humanoid_leg.urdf.xacro attaches the torso
+    to base_footprint with a FIXED joint, matching the assignment's "stand
+    stably on a flat surface using a fixed base" requirement. That means
+    /walk_command cycles the leg joints through a walking-like motion
+    pattern (an "attempt" at a gait), but it will NOT actually translate the
+    robot across a floor - there's no mechanism in this design for the base
+    itself to move. Real locomotion would need a different mechanical base
+    (feet that can bear the whole robot's weight one at a time, freed from
+    any fixed mount) and closed-loop balance, which is out of scope for what
+    was built here.
 """
 
 import math
@@ -30,7 +49,7 @@ from rclpy.node import Node
 from rclpy.duration import Duration
 from geometry_msgs.msg import PointStamped
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 import tf2_ros
 from tf2_geometry_msgs import do_transform_point
 
@@ -52,6 +71,7 @@ class IKPlannerNode(Node):
     STATE_STRIKE = 'STRIKE'
     STATE_FOLLOW = 'FOLLOW_THROUGH'
     STATE_RETRACT = 'RETRACT'
+    IDLE_STATES = (STATE_SEARCH, STATE_ALIGN, STATE_READY)
 
     def __init__(self):
         super().__init__('ik_planner_node')
@@ -60,6 +80,7 @@ class IKPlannerNode(Node):
         self.declare_parameter('kick_trigger_distance_m', 0.15)
         self.declare_parameter('align_tolerance_m', 0.02)
         self.declare_parameter('control_rate_hz', 20.0)
+        self.declare_parameter('walk_phase_duration_sec', 0.5)
 
         cfg_path = self.get_parameter('config_path').value
         self.cfg = self._load_config(cfg_path)
@@ -68,12 +89,14 @@ class IKPlannerNode(Node):
         self.geom = LegGeometry(L1=geo['L1_thigh_m'], L2=geo['L2_shin_m'])
         self.theta1_offset = math.radians(geo['theta1_servo_offset_deg'])
         self.theta2_offset = math.radians(geo['theta2_servo_offset_deg'])
-        self.kick_leg = self.cfg['kick_leg']  # 'left' or 'right'
+        self.kick_leg = self.cfg['kick_leg']         # 'left' or 'right' - default/autonomous kicking leg
+        self.active_kick_leg = self.kick_leg          # can be swapped per-kick by /kick_command
         self.balance_pose = self.cfg['balance_pose_deg']
         self.limits = self.cfg['joint_limits_deg']
 
         self.kick_trigger_d = float(self.get_parameter('kick_trigger_distance_m').value)
         self.align_tol = float(self.get_parameter('align_tolerance_m').value)
+        self.walk_phase_duration = float(self.get_parameter('walk_phase_duration_sec').value)
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -83,8 +106,13 @@ class IKPlannerNode(Node):
         self.state = self.STATE_SEARCH
         self.state_enter_time = self.get_clock().now()
 
+        self.walking = False
+        self.walk_start_time = None
+
         self.create_subscription(PointStamped, '/ball_position', self._ball_cb, 10)
         self.create_subscription(Bool, '/ball_detected', self._detected_cb, 10)
+        self.create_subscription(String, '/kick_command', self._kick_cmd_cb, 10)
+        self.create_subscription(String, '/walk_command', self._walk_cmd_cb, 10)
 
         self.cmd_pub = self.create_publisher(JointState, '/joint_commands', 10)
         self.target_pub = self.create_publisher(PointStamped, '/leg_target', 10)
@@ -92,7 +120,7 @@ class IKPlannerNode(Node):
         period = 1.0 / float(self.get_parameter('control_rate_hz').value)
         self.timer = self.create_timer(period, self.control_loop)
 
-        self.get_logger().info('IK planner started; kicking leg = ' + self.kick_leg)
+        self.get_logger().info('IK planner started; default kicking leg = ' + self.kick_leg)
 
     # ---------- config ----------
     def _load_config(self, path):
@@ -115,6 +143,56 @@ class IKPlannerNode(Node):
 
     def _detected_cb(self, msg: Bool):
         self.ball_seen_recently = msg.data
+
+    def _kick_cmd_cb(self, msg: String):
+        """Manually trigger a kick with a chosen leg, independent of vision.
+
+        Example:
+            ros2 topic pub --once /kick_command std_msgs/msg/String "{data: 'right'}"
+            ros2 topic pub --once /kick_command std_msgs/msg/String "{data: 'left'}"
+
+        Uses a fixed, generic "straight ahead" strike target rather than a
+        vision-derived one, since there may be no ball/camera involved at
+        all when testing this way.
+        """
+        leg = (msg.data or '').strip().lower()
+        if leg not in ('left', 'right'):
+            self.get_logger().warning(f"Invalid /kick_command '{msg.data}' - use 'left' or 'right'")
+            return
+        if self.walking:
+            self.get_logger().warning('Ignoring /kick_command - currently walking, send walk_command=stop first')
+            return
+        if self.state not in self.IDLE_STATES:
+            self.get_logger().warning(f'Ignoring /kick_command - already mid-kick (state={self.state})')
+            return
+
+        self.active_kick_leg = leg
+        self._kick_x = self.geom.L1 * 0.85
+        self._kick_y = 0.0
+        self.get_logger().info(f'Manual kick command received: {leg} leg')
+        self._set_state(self.STATE_WINDUP)
+
+    def _walk_cmd_cb(self, msg: String):
+        """Start/stop the open-loop marching gait.
+
+        Example:
+            ros2 topic pub --once /walk_command std_msgs/msg/String "{data: 'start'}"
+            ros2 topic pub --once /walk_command std_msgs/msg/String "{data: 'stop'}"
+        """
+        cmd = (msg.data or '').strip().lower()
+        if cmd == 'start':
+            if self.state not in self.IDLE_STATES:
+                self.get_logger().warning(f'Ignoring /walk_command start - mid-kick (state={self.state})')
+                return
+            self.walking = True
+            self.walk_start_time = self.get_clock().now()
+            self.get_logger().info('Walk gait: START (open-loop leg cycling - see module docstring re: fixed base)')
+        elif cmd == 'stop':
+            self.walking = False
+            self._publish_joint_cmd(self.balance_pose)  # return to neutral stance
+            self.get_logger().info('Walk gait: STOP')
+        else:
+            self.get_logger().warning(f"Invalid /walk_command '{msg.data}' - use 'start' or 'stop'")
 
     # ---------- helpers ----------
     def _deg(self, name):
@@ -141,8 +219,9 @@ class IKPlannerNode(Node):
         self.cmd_pub.publish(msg)
 
     def _transform_ball_to_hip_frame(self):
-        """Transform the latest ball point into the kicking-leg hip frame
-        (<side>_thigh_link) using the TF tree published from the URDF."""
+        """Transform the latest ball point into the (autonomous) kicking
+        leg's hip frame (<side>_thigh_link) using the TF tree from the URDF.
+        Manual /kick_command kicks don't use this - they use a fixed target."""
         if self.ball_point is None:
             return None
         target_frame = f'{self.kick_leg}_thigh_link'
@@ -168,6 +247,10 @@ class IKPlannerNode(Node):
         return (self.get_clock().now() - self.state_enter_time).nanoseconds / 1e9
 
     def control_loop(self):
+        if self.walking:
+            self._do_walk_step()
+            return
+
         p = self._transform_ball_to_hip_frame()
 
         if self.state == self.STATE_SEARCH:
@@ -225,12 +308,13 @@ class IKPlannerNode(Node):
         self._publish_joint_cmd(self.balance_pose)
 
         if distance <= self.kick_trigger_d:
+            self.active_kick_leg = self.kick_leg  # autonomous kicks always use the configured leg
             self._kick_x, self._kick_y = x, y
             self._set_state(self.STATE_WINDUP)
 
     def _solve_and_command_leg(self, x, y, knee_forward=True, extra=None):
         """Run IK for (x,y), verify with FK, and publish the resulting servo
-        commands for the kicking leg while holding the stance pose."""
+        commands for self.active_kick_leg while holding the stance pose."""
         try:
             theta1, theta2 = inverse_kinematics(x, y, self.geom, knee_forward=knee_forward)
         except KinematicsError as e:
@@ -242,8 +326,8 @@ class IKPlannerNode(Node):
             return False
 
         pose = dict(self.balance_pose)
-        thigh_joint = f'{self.kick_leg}_thigh'
-        shin_joint = f'{self.kick_leg}_shin'
+        thigh_joint = f'{self.active_kick_leg}_thigh'
+        shin_joint = f'{self.active_kick_leg}_shin'
         pose[thigh_joint] = self.theta1_offset + theta1
         pose[shin_joint] = self.theta2_offset + theta2
         if extra:
@@ -280,6 +364,51 @@ class IKPlannerNode(Node):
         self._publish_joint_cmd(self.balance_pose)
         if self._time_in_state() > 0.5:
             self._set_state(self.STATE_SEARCH)
+
+    # ---------- walking (open-loop, see module docstring caveat) ----------
+    def _command_leg_pair(self, left_xy=None, right_xy=None, knee_forward=True):
+        """Command BOTH legs' IK at once (unlike _solve_and_command_leg,
+        which only drives self.active_kick_leg). Used by the walk gait,
+        where both legs move every phase."""
+        pose = dict(self.balance_pose)
+
+        for side, xy in (('left', left_xy), ('right', right_xy)):
+            if xy is None:
+                continue
+            try:
+                theta1, theta2 = inverse_kinematics(xy[0], xy[1], self.geom, knee_forward=knee_forward)
+            except KinematicsError as e:
+                self.get_logger().warning(f'Walk IK ({side}) unreachable: {e}')
+                continue
+            if not verify_ik(theta1, theta2, xy[0], xy[1], self.geom):
+                self.get_logger().error(f'Walk FK verification failed ({side}) - skipping this leg')
+                continue
+            pose[f'{side}_thigh'] = self.theta1_offset + theta1
+            pose[f'{side}_shin'] = self.theta2_offset + theta2
+
+        self._publish_joint_cmd(pose)
+
+    def _do_walk_step(self):
+        """4-phase alternating march: lift+swing one leg forward, plant it,
+        then repeat with the other leg. Open-loop (no balance feedback) -
+        see the module docstring for why this won't actually translate a
+        robot whose base is fixedly mounted."""
+        elapsed = (self.get_clock().now() - self.walk_start_time).nanoseconds / 1e9
+        phase = int(elapsed / self.walk_phase_duration) % 4
+
+        reach = self.geom.L1 + self.geom.L2
+        stance = (0.0, -0.90 * reach)    # under the hip, standing tall
+        lift = (0.30 * reach, -0.50 * reach)   # raised, swung slightly forward
+        plant = (0.50 * reach, -0.80 * reach)  # forward and back down
+
+        if phase == 0:
+            self._command_leg_pair(left_xy=stance, right_xy=lift)
+        elif phase == 1:
+            self._command_leg_pair(left_xy=stance, right_xy=plant)
+        elif phase == 2:
+            self._command_leg_pair(left_xy=lift, right_xy=stance)
+        else:
+            self._command_leg_pair(left_xy=plant, right_xy=stance)
 
 
 def main(args=None):

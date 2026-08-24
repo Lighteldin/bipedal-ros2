@@ -18,7 +18,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, Command
 from launch.conditions import IfCondition
 from launch_ros.actions import Node
-
+from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('humanoid_kick_bot')
@@ -28,14 +28,21 @@ def generate_launch_description():
 
     camera_source_arg = DeclareLaunchArgument(
         'camera_source', default_value='0',
-        description='cv2.VideoCapture source: webcam index (e.g. 0) or ESP32-CAM MJPEG URL')
+        description='Fallback if esp32_cam_ip is not set: webcam index (e.g. 0) or a full MJPEG URL')
+    esp32_cam_ip_arg = DeclareLaunchArgument(
+        'esp32_cam_ip', default_value='',
+        description='ESP32-CAM IP address, e.g. 192.168.1.50 - preferred way to point at the camera; '
+                    'builds http://<ip>:81/stream automatically. Leave empty to use camera_source instead.')
     serial_port_arg = DeclareLaunchArgument(
         'serial_port', default_value='/dev/ttyUSB0',
         description='Serial port to the ESP32 running esp32_pca9685_bridge.ino')
     use_rviz_arg = DeclareLaunchArgument(
         'use_rviz', default_value='true', description='Launch RViz2')
 
-    robot_description = Command(['xacro ', urdf_path])
+    robot_description = ParameterValue(
+        Command(['xacro ', urdf_path]),
+        value_type=str
+    )
 
     robot_state_publisher = Node(
         package='robot_state_publisher',
@@ -50,7 +57,10 @@ def generate_launch_description():
         executable='ball_detector_node',
         name='ball_detector_node',
         output='screen',
-        parameters=[{'camera_source': LaunchConfiguration('camera_source')}],
+        parameters=[{
+            'camera_source': LaunchConfiguration('camera_source'),
+            'esp32_cam_ip': LaunchConfiguration('esp32_cam_ip'),
+        }],
     )
 
     ik_planner = Node(
@@ -68,7 +78,10 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'config_path': config_path,
-            'serial_port': LaunchConfiguration('serial_port'),
+            'serial_port': ParameterValue(
+                LaunchConfiguration('serial_port'),
+                value_type=str
+            ),
         }],
     )
 
@@ -83,6 +96,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         camera_source_arg,
+        esp32_cam_ip_arg,
         serial_port_arg,
         use_rviz_arg,
         robot_state_publisher,

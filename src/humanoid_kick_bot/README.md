@@ -5,9 +5,8 @@ football with a camera, computes leg joint angles with forward/inverse
 kinematics, and kicks it — built as a modular perception → planning →
 control pipeline.
 
-> **Scope note:** the robot stands in one spot and kicks. It does not walk
-> toward the ball. That matches the assignment's "stand stably on a flat
-> surface using a fixed base" requirement.
+> **Scope note:** the robot stands in one spot and kicks; it does not
+> translate across a floor. See "About the walk command" below for why.
 
 ---
 
@@ -19,189 +18,151 @@ Camera → Perception Node → Planning Node → Control Node → ESP32 + PCA968
                             decision logic)
 ```
 
-Three ROS 2 nodes, each doing one job, talking only through topics:
+Three ROS 2 nodes, each doing one job, talking only through topics.
 
-| Stage | Node | Job |
+---
+
+## 2. Two separate ESP32 boards
+
+This project uses **two physically separate ESP32s** — don't try to combine
+them:
+
+| Board | Runs | Job |
 |---|---|---|
-| Perception | `ball_detector_node` | Find the ball in the camera image, estimate its 3D position |
-| Planning | `ik_planner_node` | Decide what the robot should do, and where the foot should go, using FK/IK |
-| Control | `servo_controller_node` | Turn joint angles into real PWM signals and send them to hardware |
+| ESP32-CAM | `firmware/esp32cam_streamer/esp32cam_streamer.ino` | Streams video over WiFi to `ball_detector_node` |
+| Plain ESP32 | `firmware/esp32_pca9685_bridge/esp32_pca9685_bridge.ino` | Drives the PCA9685 over I²C (GPIO21/22) from `servo_controller_node`'s serial commands |
 
-Below that sits `robot_state_publisher`, which reads the URDF (the robot's
-"skeleton" description) and publishes the TF tree, letting RViz draw the
-robot and letting the planner reason about coordinate frames.
+Their GPIO21/22 usages are unrelated: on the ESP32-CAM those pins are
+hardwired to the camera sensor itself; they're not available for I²C on
+that board.
 
----
-
-## 2. This is a **package**, not multiple packages
-
-Everything lives in **one ROS 2 package**, `humanoid_kick_bot`, built with
-`ament_python`. "Modular" here means modular *nodes* inside one package
-(separate perception/planning/control processes talking over topics), not
-separate ROS packages — that's a normal and expected way to satisfy a
-"modular architecture" requirement without the overhead of managing
-several interdependent packages.
-
----
-
-## 3. What's in the package, and what each part does
-
-```
-humanoid_kick_bot/
-├── humanoid_kick_bot/            ← Python source (the actual node code)
-│   ├── kinematics.py
-│   ├── ball_detector_node.py
-│   ├── ik_planner_node.py
-│   └── servo_controller_node.py
-├── config/
-│   └── servo_config.yaml
-├── urdf/
-│   └── humanoid_leg.urdf.xacro
-├── launch/
-│   ├── bringup.launch.py
-│   └── visualize_and_move.launch.py
-├── rviz/
-│   └── humanoid.rviz
-├── firmware/
-│   └── esp32_pca9685_bridge/esp32_pca9685_bridge.ino
-├── package.xml
-├── setup.py / setup.cfg
-└── README.md
-```
-
-### `kinematics.py` — the math, no ROS involved
-Pure Python functions, no dependency on ROS at all, so they can be tested
-in isolation (and were — round-trip tested over a full angle grid).
-
-- `forward_kinematics(theta1, theta2, geom)` — given hip angle θ1 and knee
-  angle θ2, returns where the foot ends up `(x, y)`.
-- `inverse_kinematics(x, y, geom, knee_forward)` — given a target foot
-  position, returns the θ1/θ2 needed to reach it, using the law of
-  cosines. Raises `KinematicsError` if the target is out of reach.
-- `verify_ik(...)` — re-runs FK on an IK result and checks it actually
-  reproduces the target. This is the runtime safety check: if IK produced
-  a bad answer, this catches it *before* a servo command is sent.
-
-### `ball_detector_node.py` — perception
-Opens a camera (USB webcam or an ESP32-CAM MJPEG stream), and every frame:
-1. Thresholds the image by color (HSV) to isolate the ball.
-2. Finds the largest ball-shaped contour.
-3. Uses the pinhole camera model (`known ball size + pixel size → distance`)
-   to estimate how far away the ball is, and how far left/right/up/down.
-4. Publishes that as `/ball_position` (a 3D point) and `/ball_detected`
-   (a yes/no flag).
-
-*(Not wired into your testing yet — you've been feeding fake positions by
-hand instead, which is exactly what this node's output would normally be.)*
-
-### `ik_planner_node.py` — planning + the autonomy logic
-This is the "brain." It:
-1. Listens for `/ball_position`.
-2. Uses `tf2` to convert that position from the camera's frame into the
-   kicking leg's own frame (i.e. "how far is the ball from *this hip
-   joint*").
-3. Runs `inverse_kinematics()` to get the θ1/θ2 needed to reach it, and
-   `verify_ik()` to double check the answer before trusting it.
-4. Runs a state machine that makes the whole thing autonomous — no person
-   needs to press a button mid-sequence:
-
+### Setting up the ESP32-CAM
+1. Open `esp32cam_streamer.ino`, set `WIFI_SSID`/`WIFI_PASSWORD` near the top.
+2. Board: **AI Thinker ESP32-CAM**, Partition Scheme: **Huge APP**.
+3. Upload, then open Serial Monitor @ 115200 baud — it prints its IP once
+   connected, e.g. `Camera ready! Stream at: http://192.168.1.50:81/stream`.
+4. Point `ball_detector_node` at it with `esp32_cam_ip` (preferred — builds
+   the URL automatically) or `camera_source` (a full URL, or a webcam
+   index like `0` for local testing without the ESP32-CAM):
+   ```bash
+   ros2 launch humanoid_kick_bot bringup.launch.py esp32_cam_ip:=192.168.1.50
    ```
-   SEARCH → ALIGN → APPROACH_READY → WINDUP → STRIKE → FOLLOW_THROUGH → RETRACT → (back to SEARCH)
-   ```
+5. **Calibrate `focal_length_px`** for your specific camera: hold the ball
+   at a known distance, note the pixel radius it reports, and solve
+   `focal_length_px = pixel_radius * distance_m / ball_radius_m`.
 
-   - **SEARCH** — no ball seen; sweep the camera pan servo looking for one.
-   - **ALIGN** — ball seen; rotate to center it.
-   - **APPROACH_READY** — ball centered; wait until it's within kicking range.
-   - **WINDUP → STRIKE → FOLLOW_THROUGH** — the kick itself, as three IK
-     targets in sequence.
-   - **RETRACT** — leg returns to neutral standing pose, cycle repeats.
-
-5. Publishes the resulting joint angles for **all 9 servos** (not just the
-   two leg joints) on `/joint_commands`, since the rest of the body needs
-   to hold a steady stance pose while the kick happens.
-
-### `servo_controller_node.py` — control (the only node that talks to hardware)
-1. Subscribes to `/joint_commands` (angles in radians).
-2. Converts radians → degrees → PWM ticks, using your `120–520` /
-   `0–180°` calibration from `servo_config.yaml`.
-3. Clamps each joint to its configured safe range of motion.
-4. Sends `"channel,ticks\n"` lines over USB serial to the ESP32.
-5. Keeps a running record of every joint's current angle and republishes
-   the **full 9-joint state** on `/joint_states` five times a second — this
-   is what lets RViz and `robot_state_publisher` always have a complete,
-   current picture of the robot, regardless of whether real hardware is
-   attached or when RViz happened to start.
-
-If no ESP32 is plugged in (or `pyserial` isn't installed), this node
-**doesn't crash** — it logs what it *would* have sent and keeps running, so
-you can still test the rest of the system without hardware.
-
-### `esp32_pca9685_bridge.ino` — the only code that isn't ROS
-Arduino firmware for the ESP32. It does nothing clever: reads
-`"channel,ticks"` lines off serial and calls `pwm.setPWM()`. All the
-"thinking" happens upstream in ROS; this is just the last hop from serial
-bytes to an I²C command on the PCA9685.
-
-### `humanoid_leg.urdf.xacro` — the robot's skeleton
-Describes every link and joint (fixed base, waist → thigh → shin → foot per
-leg, camera pan) with the same names used everywhere else in the code.
-`robot_state_publisher` reads this and, combined with live `/joint_states`
-data, computes the full TF tree — the thing that lets RViz draw the robot
-moving and lets the planner reason in 3D coordinates.
-
-### `servo_config.yaml` — the single source of truth
-Every other file reads from this instead of hardcoding numbers:
-channel-to-servo mapping, PWM calibration, per-joint safety limits, leg
-link lengths (`L1`/`L2`), and the "balance pose" the stance leg holds
-during a kick. **Update this file, not the code**, when you measure your
-real hardware.
-
-### `launch/bringup.launch.py` — full system
-Starts everything: perception + planning + control + `robot_state_publisher`
-+ RViz. This is the "real" autonomous launch, once the camera is wired in.
-
-### `launch/visualize_and_move.launch.py` — dev/testing launch
-Starts only `robot_state_publisher` + RViz + `servo_controller_node` — no
-camera, no planner. This is what you've actually been using: you manually
-publish to `/joint_commands` and watch both the real servo and the RViz
-model respond.
-
-### `rviz/humanoid.rviz` — saved RViz layout
-So you don't have to manually add the RobotModel/TF displays every time you
-open RViz.
+WiFi MJPEG is less reliable than a wired webcam — `ball_detector_node` now
+auto-reconnects after ~1s of failed frame reads (tunable via
+`reconnect_after_failures` / `reconnect_backoff_sec` params), so a dropped
+stream recovers on its own instead of leaving the node stuck.
 
 ---
 
-## 4. Topics, at a glance
+## 3. Topics, at a glance
 
 | Topic | Type | Published by | Used by |
 |---|---|---|---|
 | `/ball_position` | `geometry_msgs/PointStamped` | `ball_detector_node` | `ik_planner_node` |
 | `/ball_detected` | `std_msgs/Bool` | `ball_detector_node` | `ik_planner_node` |
-| `/joint_commands` | `sensor_msgs/JointState` | `ik_planner_node` (or you, manually) | `servo_controller_node` |
+| `/kick_command` | `std_msgs/String` (`"left"`/`"right"`) | you, manually | `ik_planner_node` |
+| `/walk_command` | `std_msgs/String` (`"start"`/`"stop"`) | you, manually | `ik_planner_node` |
+| `/joint_commands` | `sensor_msgs/JointState` | `ik_planner_node` | `servo_controller_node` |
 | `/joint_states` | `sensor_msgs/JointState` | `servo_controller_node` | `robot_state_publisher` |
 
 ---
 
-## 5. What's actually verified working right now
+## 4. Manual commands
 
-- ✅ `servo_controller_node` — confirmed moving real servos over serial via
-  manual `ros2 topic pub` commands, on every channel.
-- ✅ `kinematics.py` — FK/IK round-trip tested in isolation, correct.
-- ✅ RViz visualization — `robot_state_publisher` + RViz showing the full
-  TF tree and robot model, driven by `/joint_states`.
-- ⏳ `ball_detector_node` — built, not yet connected (no camera wired in).
-- ⏳ `ik_planner_node` — built, not yet run end-to-end (you've been
-  substituting manual `/joint_commands` publishes for its output).
+These bypass the camera entirely — useful for bench-testing the leg motion
+without needing a ball in view. Both require `ik_planner_node` to be
+running (they're ignored while it's mid-kick or mid-walk).
+
+### Kick with a specific leg
+```bash
+ros2 topic pub --once /kick_command std_msgs/msg/String "{data: 'right'}"
+ros2 topic pub --once /kick_command std_msgs/msg/String "{data: 'left'}"
+```
+Runs the same WINDUP → STRIKE → FOLLOW_THROUGH → RETRACT sequence as an
+autonomous ball-triggered kick, but on whichever leg you name, aimed at a
+fixed "straight ahead" target instead of a vision-derived one.
+
+### Attempt to walk
+```bash
+ros2 topic pub --once /walk_command std_msgs/msg/String "{data: 'start'}"
+ros2 topic pub --once /walk_command std_msgs/msg/String "{data: 'stop'}"
+```
+Cycles both legs through a 4-phase alternating march (lift/swing one leg
+forward, plant it, repeat with the other), computed via the same IK solver.
+
+**About the walk command:** the URDF attaches the torso to `base_footprint`
+with a **fixed** joint, matching the assignment's "stand stably on a flat
+surface using a fixed base" requirement. So this command makes the *joints*
+cycle through a walking motion, but it will **not** actually move the robot
+across a floor — there's no mechanism in this mechanical design for the
+base itself to translate, and no closed-loop balance control. Treat it as
+a gait demo / stretch-goal starting point, not a working locomotion system.
+Real walking would need a different mechanical base (feet that can bear
+the robot's full weight one at a time, not fixed-mounted) plus balance
+feedback — a substantially bigger project than what's built here.
+
+---
+
+## 5. What's in the package
+
+```
+humanoid_kick_bot/
+├── humanoid_kick_bot/
+│   ├── kinematics.py            # FK/IK, pure Python, unit-tested
+│   ├── ball_detector_node.py    # perception (ESP32-CAM MJPEG + auto-reconnect)
+│   ├── ik_planner_node.py       # planning: autonomy state machine + kick/walk commands
+│   └── servo_controller_node.py # control: rad -> PWM -> serial to ESP32
+├── config/servo_config.yaml     # channel map, PWM calib, link lengths, limits
+├── urdf/humanoid_leg.urdf.xacro # mechanical model, drives TF/RViz
+├── launch/
+│   ├── bringup.launch.py            # full system: camera + planner + control + RViz
+│   └── visualize_and_move.launch.py # dev/testing: RViz + control only, no camera/planner
+├── rviz/humanoid.rviz
+├── firmware/
+│   ├── esp32cam_streamer/esp32cam_streamer.ino     # ESP32-CAM: video streaming
+│   └── esp32_pca9685_bridge/esp32_pca9685_bridge.ino # ESP32: servo control
+├── package.xml / setup.py / setup.cfg
+└── README.md
+```
+
+### `kinematics.py`
+Pure math, no ROS dependency. `forward_kinematics()`, `inverse_kinematics()`
+(law of cosines, raises `KinematicsError` if unreachable), and `verify_ik()`
+— a runtime FK-recheck of every IK solution before it's ever sent to a servo.
+
+### `ball_detector_node.py`
+Reads the ESP32-CAM's MJPEG stream, isolates the ball by HSV color +
+contour circularity, estimates distance via the pinhole camera model, and
+publishes `/ball_position` + `/ball_detected`. Auto-reconnects on stream
+failure.
+
+### `ik_planner_node.py`
+The "brain": autonomous ball-kicking state machine, plus the two manual
+override commands described above (`/kick_command`, `/walk_command`).
+Publishes final joint targets on `/joint_commands`.
+
+### `servo_controller_node.py`
+Converts `/joint_commands` (radians) → PWM ticks → serial to the ESP32.
+Continuously republishes the full 9-joint pose on `/joint_states` so RViz
+always has complete, current data. Falls back to a logged dry-run if no
+serial hardware is attached.
+
+### `servo_config.yaml`
+Single source of truth: channel mapping, PWM calibration, per-joint safety
+limits, leg link lengths (`L1`/`L2`), and the balance/stance pose.
 
 ---
 
 ## 6. Quick reference: running it
 
 ```bash
-# Everything, real system (once camera is wired in):
+# Full system, real ESP32-CAM:
 ros2 launch humanoid_kick_bot bringup.launch.py \
-    camera_source:=0 serial_port:=/dev/ttyUSB0
+    esp32_cam_ip:=192.168.1.50 serial_port:=/dev/ttyUSB0
 
 # Visualization + manual servo testing only, no camera/planner:
 ros2 launch humanoid_kick_bot visualize_and_move.launch.py \
@@ -210,4 +171,11 @@ ros2 launch humanoid_kick_bot visualize_and_move.launch.py \
 # Manually command one joint (radians), e.g. right_thigh to 150°:
 ros2 topic pub --once /joint_commands sensor_msgs/msg/JointState \
     "{name: ['right_thigh'], position: [2.618]}"
+
+# Trigger a kick without a ball/camera:
+ros2 topic pub --once /kick_command std_msgs/msg/String "{data: 'right'}"
+
+# Try the walk gait:
+ros2 topic pub --once /walk_command std_msgs/msg/String "{data: 'start'}"
+ros2 topic pub --once /walk_command std_msgs/msg/String "{data: 'stop'}"
 ```
